@@ -292,11 +292,7 @@ def main():
   parser.add_argument('--img-size', type=int, dest='img_size',
             default='416', help='size of the output image')
   parser.add_argument('--coco-dataset-file', type=str, dest='coco_dataset_file',
-            help='path to the coco dataset file, e.g., coco.yaml')      
-                        help='path to the coco dataset file, e.g., coco.yaml')      
-            help='path to the coco dataset file, e.g., coco.yaml')      
-                        help='path to the coco dataset file, e.g., coco.yaml')      
-            help='path to the coco dataset file, e.g., coco.yaml')      
+            help='path to the coco dataset file, e.g., coco.yaml')            
   parser.add_argument('--quantize-model', action='store_true', dest='quantize',
             help='Pass flag quantized models are needed (Only works on macOS)')
   opt = parser.parse_args()
