@@ -6,6 +6,7 @@ The scripts in this repo can be used to export a YOLOv5 model to coreml and benc
 
 * python 3.8.x
 * poetry
+* pyyaml
 
 Other dependencies are installed by poetry automatically with:
 ```console 

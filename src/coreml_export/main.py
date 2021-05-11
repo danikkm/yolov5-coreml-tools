@@ -22,6 +22,8 @@ from coremltools.converters.mil import Builder as mb
 from coremltools.converters.mil import register_torch_op
 from coremltools.converters.mil.frontend.torch.ops import _get_inputs
 
+import yaml
+
 @register_torch_op
 def silu(context, node):
     inputs = _get_inputs(context, node, expected=1)
@@ -29,6 +31,19 @@ def silu(context, node):
     y = mb.sigmoid(x=x)
     z = mb.mul(x=x, y=y, name=node.name)
     context.add(z)
+
+def read_coco_dataset_labels(opt):
+    dataset_file = {}
+    labels = []
+    with open(opt.coco_dataset_file, 'r') as file:
+        dataset_file = yaml.load(file, Loader=yaml.FullLoader)
+    
+    try:
+        labels = dataset_file['names']
+    except Exception as e:
+        assert False, "Error: invalid coco dataset file provided"
+
+    return labels
 
 def make_grid(nx, ny):
     yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
@@ -268,7 +283,6 @@ def combine_models_and_export(opt, builder_spec, nms_spec, file_name, quantize=F
 
 
 def main():
-
     parser = ArgumentParser()
     parser.add_argument('--model-input-path', type=str, dest="model_input_path",
                         default='models/yolov5s_v4.pt', help='path to yolov5 model')
@@ -278,17 +292,19 @@ def main():
                         default='yolov5-iOS', help='model output name')
     parser.add_argument('--img-size', type=int, dest="img_size",
                         default='416', help='size of the output image')
+    parser.add_argument('--coco-dataset-file', type=str, dest="coco_dataset_file",
+                        help='path to the coco dataset file, e.g., coco.yaml')      
     parser.add_argument('--quantize-model', action="store_true", dest="quantize",
-                        help='Pass flag quantized models are needed (Only works on mac Os)')
+                        help='Pass flag quantized models are needed (Only works on macOS)')
     opt = parser.parse_args()
 
     if not Path(opt.model_input_path).exists():
-        print("Error: Input model not found")
-        return
+        assert False, "Error: Input model not found"
 
+    if not opt.coco_dataset_file:
+        assert False, "Error: Please provide path to the coco dataset file"
 
-    # The labels of your model, pretrained YOLOv5 models usually use the coco dataset and have 80 classes
-    class_labels = [f"label{i}" for i in range(80)]
+    class_labels = read_coco_dataset_labels(opt)
     number_of_class_labels = len(class_labels)
 
     output_size = number_of_class_labels + 5
@@ -299,7 +315,7 @@ def main():
     strides = [8, 16, 32]
 
     if not all(opt.img_size % i == 0 for i in strides):
-        assert False, 'Please provide valid image size'
+        assert False, 'Error: Please provide valid image size'
 
     if reverseModel:
         strides.reverse()
@@ -342,7 +358,6 @@ def main():
 
     # Combine model with export logic and nms logic
     combine_models_and_export(opt, builder.spec, nms_spec, f"{opt.model_output_directory}/{opt.model_output_name}.mlmodel", opt.quantize)
-
 
 if __name__ == '__main__':
     main()
