@@ -35,166 +35,166 @@ def make_grid(nx, ny):
     return torch.stack((xv, yv), 2).view((ny, nx, 2)).float()
 
 
-def exportTorchscript(model, sampleInput, checkInputs, fileName):
+def export_torchscript(model, sample_input, check_inputs, file_name):
     '''
     Traces a pytorch model and produces a TorchScript
     '''
     try:
         print(f'Starting TorchScript export with torch {torch.__version__}')
-        ts = torch.jit.trace(model, sampleInput, check_inputs=checkInputs)
-        ts.save(fileName)
-        print(f'TorchScript export success, saved as {fileName}')
+        ts = torch.jit.trace(model, sample_input, check_inputs=check_inputs)
+        ts.save(file_name)
+        print(f'TorchScript export success, saved as {file_name}')
         return ts
     except Exception as e:
         print(f'TorchScript export failure: {e}')
 
 
-def convertToCoremlSpec(torchScript, sampleInput):
+def convert_to_coreml_spec(torch_script, sample_input):
     '''
     Converts a torchscript to a coreml model
     '''
     try:
         print(f'Starting CoreML conversion with coremltools {ct.__version__}')
-        nnSpec = ct.convert(torchScript, inputs=[ct.ImageType(
-            name='image', shape=sampleInput.shape, scale=1 / 255.0, bias=[0, 0, 0])]).get_spec()
+        nn_spec = ct.convert(torch_script, inputs=[ct.ImageType(
+            name='image', shape=sample_input.shape, scale=1 / 255.0, bias=[0, 0, 0])]).get_spec()
 
         print(f'CoreML conversion success')
     except Exception as e:
         print(f'CoreML conversion failure: {e}')
         return
-    return nnSpec
+    return nn_spec
 
 
-def addOutputMetaData(nnSpec, featureMapDimensions, outputSize):
+def add_output_meta_data(nn_spec, feature_map_dimensions, output_size):
     '''
     Adds the correct output shapes and data types to the coreml model
     '''
-    for i, featureMapDimension in enumerate(featureMapDimensions):
-        nnSpec.description.output[i].type.multiArrayType.shape.append(1)
-        nnSpec.description.output[i].type.multiArrayType.shape.append(3)
-        nnSpec.description.output[i].type.multiArrayType.shape.append(
-            featureMapDimension)
-        nnSpec.description.output[i].type.multiArrayType.shape.append(
-            featureMapDimension)
+    for i, feature_map_dimension in enumerate(feature_map_dimensions):
+        nn_spec.description.output[i].type.multiArrayType.shape.append(1)
+        nn_spec.description.output[i].type.multiArrayType.shape.append(3)
+        nn_spec.description.output[i].type.multiArrayType.shape.append(
+            feature_map_dimension)
+        nn_spec.description.output[i].type.multiArrayType.shape.append(
+            feature_map_dimension)
         # pc, bx, by, bh, bw, c (no of class class labels)
-        nnSpec.description.output[i].type.multiArrayType.shape.append(
-            outputSize)
-        nnSpec.description.output[i].type.multiArrayType.dataType = ct.proto.FeatureTypes_pb2.ArrayFeatureType.DOUBLE
+        nn_spec.description.output[i].type.multiArrayType.shape.append(
+            output_size)
+        nn_spec.description.output[i].type.multiArrayType.dataType = ct.proto.FeatureTypes_pb2.ArrayFeatureType.DOUBLE
 
 
-def addExportLayerToCoreml(opt, builder, anchorGrid, featureMapDimensions, strides, numberOfClassLabels):
+def add_export_layer_to_coreml(opt, builder, anchor_grid, feature_map_dimensions, strides, number_of_class_labels):
     '''
     Adds the yolov5 export layer to the coreml model
     '''
-    outputNames = [output.name for output in builder.spec.description.output]
+    output_names = [output.name for output in builder.spec.description.output]
 
-    for i, outputName in enumerate(outputNames):
+    for i, output_name in enumerate(output_names):
         # formulas: https://github.com/ultralytics/yolov5/issues/471
-        builder.add_activation(name=f"sigmoid_{outputName}", non_linearity="SIGMOID",
-                               input_name=outputName, output_name=f"{outputName}_sigmoid")
+        builder.add_activation(name=f"sigmoid_{output_name}", non_linearity="SIGMOID",
+                               input_name=output_name, output_name=f"{output_name}_sigmoid")
 
         ### Coordinates calculation ###
         # input (1, 3, nC, nC, 85), output (1, 3, nC, nC, 2) -> nC = 640 / strides[i]
-        builder.add_slice(name=f"slice_coordinates_xy_{outputName}", input_name=f"{outputName}_sigmoid",
-                          output_name=f"{outputName}_sliced_coordinates_xy", axis="width", start_index=0, end_index=2)
+        builder.add_slice(name=f"slice_coordinates_xy_{output_name}", input_name=f"{output_name}_sigmoid",
+                          output_name=f"{output_name}_sliced_coordinates_xy", axis="width", start_index=0, end_index=2)
         # x,y * 2
-        builder.add_elementwise(name=f"multiply_xy_by_two_{outputName}", input_names=[
-                                f"{outputName}_sliced_coordinates_xy"], output_name=f"{outputName}_multiplied_xy_by_two", mode="MULTIPLY", alpha=2)
+        builder.add_elementwise(name=f"multiply_xy_by_two_{output_name}", input_names=[
+                                f"{output_name}_sliced_coordinates_xy"], output_name=f"{output_name}_multiplied_xy_by_two", mode="MULTIPLY", alpha=2)
         # x,y * 2 - 0.5
-        builder.add_elementwise(name=f"subtract_0_5_from_xy_{outputName}", input_names=[
-                                f"{outputName}_multiplied_xy_by_two"], output_name=f"{outputName}_subtracted_0_5_from_xy", mode="ADD", alpha=-0.5)
+        builder.add_elementwise(name=f"subtract_0_5_from_xy_{output_name}", input_names=[
+                                f"{output_name}_multiplied_xy_by_two"], output_name=f"{output_name}_subtracted_0_5_from_xy", mode="ADD", alpha=-0.5)
         grid = make_grid(
-            featureMapDimensions[i], featureMapDimensions[i]).numpy()
+            feature_map_dimensions[i], feature_map_dimensions[i]).numpy()
         # x,y * 2 - 0.5 + grid[i]
-        builder.add_bias(name=f"add_grid_from_xy_{outputName}", input_name=f"{outputName}_subtracted_0_5_from_xy",
-                         output_name=f"{outputName}_added_grid_xy", b=grid, shape_bias=grid.shape)
+        builder.add_bias(name=f"add_grid_from_xy_{output_name}", input_name=f"{output_name}_subtracted_0_5_from_xy",
+                         output_name=f"{output_name}_added_grid_xy", b=grid, shape_bias=grid.shape)
         # (x,y * 2 - 0.5 + grid[i]) * stride[i]
-        builder.add_elementwise(name=f"multiply_xy_by_stride_{outputName}", input_names=[
-                                f"{outputName}_added_grid_xy"], output_name=f"{outputName}_calculated_xy", mode="MULTIPLY", alpha=strides[i])
+        builder.add_elementwise(name=f"multiply_xy_by_stride_{output_name}", input_names=[
+                                f"{output_name}_added_grid_xy"], output_name=f"{output_name}_calculated_xy", mode="MULTIPLY", alpha=strides[i])
 
         # input (1, 3, nC, nC, 85), output (1, 3, nC, nC, 2)
-        builder.add_slice(name=f"slice_coordinates_wh_{outputName}", input_name=f"{outputName}_sigmoid",
-                          output_name=f"{outputName}_sliced_coordinates_wh", axis="width", start_index=2, end_index=4)
+        builder.add_slice(name=f"slice_coordinates_wh_{output_name}", input_name=f"{output_name}_sigmoid",
+                          output_name=f"{output_name}_sliced_coordinates_wh", axis="width", start_index=2, end_index=4)
         # w,h * 2
-        builder.add_elementwise(name=f"multiply_wh_by_two_{outputName}", input_names=[
-                                f"{outputName}_sliced_coordinates_wh"], output_name=f"{outputName}_multiplied_wh_by_two", mode="MULTIPLY", alpha=2)
+        builder.add_elementwise(name=f"multiply_wh_by_two_{output_name}", input_names=[
+                                f"{output_name}_sliced_coordinates_wh"], output_name=f"{output_name}_multiplied_wh_by_two", mode="MULTIPLY", alpha=2)
         # (w,h * 2) ** 2
-        builder.add_unary(name=f"power_wh_{outputName}", input_name=f"{outputName}_multiplied_wh_by_two",
-                          output_name=f"{outputName}_power_wh", mode="power", alpha=2)
+        builder.add_unary(name=f"power_wh_{output_name}", input_name=f"{output_name}_multiplied_wh_by_two",
+                          output_name=f"{output_name}_power_wh", mode="power", alpha=2)
         # (w,h * 2) ** 2 * anchor_grid[i]
-        anchor = anchorGrid[i].expand(-1, featureMapDimensions[i],
-                                      featureMapDimensions[i], -1).numpy()
+        anchor = anchor_grid[i].expand(-1, feature_map_dimensions[i],
+                                      feature_map_dimensions[i], -1).numpy()
         builder.add_load_constant_nd(
-            name=f"anchors_{outputName}", output_name=f"{outputName}_anchors", constant_value=anchor, shape=anchor.shape)
-        builder.add_elementwise(name=f"multiply_wh_with_achors_{outputName}", input_names=[
-                                f"{outputName}_power_wh", f"{outputName}_anchors"], output_name=f"{outputName}_calculated_wh", mode="MULTIPLY")
+            name=f"anchors_{output_name}", output_name=f"{output_name}_anchors", constant_value=anchor, shape=anchor.shape)
+        builder.add_elementwise(name=f"multiply_wh_with_achors_{output_name}", input_names=[
+                                f"{output_name}_power_wh", f"{output_name}_anchors"], output_name=f"{output_name}_calculated_wh", mode="MULTIPLY")
 
-        builder.add_concat_nd(name=f"concat_coordinates_{outputName}", input_names=[
-                              f"{outputName}_calculated_xy", f"{outputName}_calculated_wh"], output_name=f"{outputName}_raw_coordinates", axis=-1)
-        builder.add_scale(name=f"normalize_coordinates_{outputName}", input_name=f"{outputName}_raw_coordinates",
-                          output_name=f"{outputName}_raw_normalized_coordinates", W=torch.tensor([1 / opt.img_size]).numpy(), b=0, has_bias=False)
+        builder.add_concat_nd(name=f"concat_coordinates_{output_name}", input_names=[
+                              f"{output_name}_calculated_xy", f"{output_name}_calculated_wh"], output_name=f"{output_name}_raw_coordinates", axis=-1)
+        builder.add_scale(name=f"normalize_coordinates_{output_name}", input_name=f"{output_name}_raw_coordinates",
+                          output_name=f"{output_name}_raw_normalized_coordinates", W=torch.tensor([1 / opt.img_size]).numpy(), b=0, has_bias=False)
 
         ### Confidence calculation ###
-        builder.add_slice(name=f"slice_object_confidence_{outputName}", input_name=f"{outputName}_sigmoid",
-                          output_name=f"{outputName}_object_confidence", axis="width", start_index=4, end_index=5)
-        builder.add_slice(name=f"slice_label_confidence_{outputName}", input_name=f"{outputName}_sigmoid",
-                          output_name=f"{outputName}_label_confidence", axis="width", start_index=5, end_index=0)
+        builder.add_slice(name=f"slice_object_confidence_{output_name}", input_name=f"{output_name}_sigmoid",
+                          output_name=f"{output_name}_object_confidence", axis="width", start_index=4, end_index=5)
+        builder.add_slice(name=f"slice_label_confidence_{output_name}", input_name=f"{output_name}_sigmoid",
+                          output_name=f"{output_name}_label_confidence", axis="width", start_index=5, end_index=0)
         # confidence = object_confidence * label_confidence
-        builder.add_multiply_broadcastable(name=f"multiply_object_label_confidence_{outputName}", input_names=[
-                                           f"{outputName}_label_confidence", f"{outputName}_object_confidence"], output_name=f"{outputName}_raw_confidence")
+        builder.add_multiply_broadcastable(name=f"multiply_object_label_confidence_{output_name}", input_names=[
+                                           f"{output_name}_label_confidence", f"{output_name}_object_confidence"], output_name=f"{output_name}_raw_confidence")
 
         # input: (1, 3, nC, nC, 85), output: (3 * nc^2, 85)
         builder.add_flatten_to_2d(
-            name=f"flatten_confidence_{outputName}", input_name=f"{outputName}_raw_confidence", output_name=f"{outputName}_flatten_raw_confidence", axis=-1)
+            name=f"flatten_confidence_{output_name}", input_name=f"{output_name}_raw_confidence", output_name=f"{output_name}_flatten_raw_confidence", axis=-1)
         builder.add_flatten_to_2d(
-            name=f"flatten_coordinates_{outputName}", input_name=f"{outputName}_raw_normalized_coordinates", output_name=f"{outputName}_flatten_raw_coordinates", axis=-1)
+            name=f"flatten_coordinates_{output_name}", input_name=f"{output_name}_raw_normalized_coordinates", output_name=f"{output_name}_flatten_raw_coordinates", axis=-1)
 
     builder.add_concat_nd(name="concat_confidence", input_names=[
-                          f"{outputName}_flatten_raw_confidence" for outputName in outputNames], output_name="raw_confidence", axis=-2)
+                          f"{output_name}_flatten_raw_confidence" for output_name in output_names], output_name="raw_confidence", axis=-2)
     builder.add_concat_nd(name="concat_coordinates", input_names=[
-                          f"{outputName}_flatten_raw_coordinates" for outputName in outputNames], output_name="raw_coordinates", axis=-2)
+                          f"{output_name}_flatten_raw_coordinates" for output_name in output_names], output_name="raw_coordinates", axis=-2)
 
     builder.set_output(output_names=["raw_confidence", "raw_coordinates"], output_dims=[
                        (3 * ((opt.img_size // 8 )**2 + (opt.img_size // 16)**2 + (opt.img_size // 32)**2),
-                        numberOfClassLabels), (3 * ((opt.img_size // 8 )**2 + (opt.img_size // 16)**2 + (opt.img_size // 32)**2), 4)])
+                        number_of_class_labels), (3 * ((opt.img_size // 8 )**2 + (opt.img_size // 16)**2 + (opt.img_size // 32)**2), 4)])
 
 
-def createNmsModelSpec(nnSpec, numberOfClassLabels, classLabels):
+def create_nms_model_spec(nn_spec, number_of_class_labels, class_labels):
     '''
     Create a coreml model with nms to filter the results of the model
     '''
-    nmsSpec = ct.proto.Model_pb2.Model()
-    nmsSpec.specificationVersion = 4
+    nms_spec = ct.proto.Model_pb2.Model()
+    nms_spec.specificationVersion = 4
 
     # Define input and outputs of the model
     for i in range(2):
-        nnOutput = nnSpec.description.output[i].SerializeToString()
+        nnOutput = nn_spec.description.output[i].SerializeToString()
 
-        nmsSpec.description.input.add()
-        nmsSpec.description.input[i].ParseFromString(nnOutput)
+        nms_spec.description.input.add()
+        nms_spec.description.input[i].ParseFromString(nnOutput)
 
-        nmsSpec.description.output.add()
-        nmsSpec.description.output[i].ParseFromString(nnOutput)
+        nms_spec.description.output.add()
+        nms_spec.description.output[i].ParseFromString(nnOutput)
 
-    nmsSpec.description.output[0].name = "confidence"
-    nmsSpec.description.output[1].name = "coordinates"
+    nms_spec.description.output[0].name = "confidence"
+    nms_spec.description.output[1].name = "coordinates"
 
     # Define output shape of the model
-    outputSizes = [numberOfClassLabels, 4]
-    for i in range(len(outputSizes)):
-        maType = nmsSpec.description.output[i].type.multiArrayType
+    output_sizes = [number_of_class_labels, 4]
+    for i in range(len(output_sizes)):
+        maType = nms_spec.description.output[i].type.multiArrayType
         # First dimension of both output is the number of boxes, which should be flexible
         maType.shapeRange.sizeRanges.add()
         maType.shapeRange.sizeRanges[0].lowerBound = 0
         maType.shapeRange.sizeRanges[0].upperBound = -1
         # Second dimension is fixed, for "confidence" it's the number of classes, for coordinates it's position (x, y) and size (w, h)
         maType.shapeRange.sizeRanges.add()
-        maType.shapeRange.sizeRanges[1].lowerBound = outputSizes[i]
-        maType.shapeRange.sizeRanges[1].upperBound = outputSizes[i]
+        maType.shapeRange.sizeRanges[1].lowerBound = output_sizes[i]
+        maType.shapeRange.sizeRanges[1].upperBound = output_sizes[i]
         del maType.shape[:]
 
     # Define the model type non maximum supression
-    nms = nmsSpec.nonMaximumSuppression
+    nms = nms_spec.nonMaximumSuppression
     nms.confidenceInputFeatureName = "raw_confidence"
     nms.coordinatesInputFeatureName = "raw_coordinates"
     nms.confidenceOutputFeatureName = "confidence"
@@ -205,19 +205,19 @@ def createNmsModelSpec(nnSpec, numberOfClassLabels, classLabels):
     nms.iouThreshold = 0.6
     nms.confidenceThreshold = 0.4
 
-    nms.stringClassLabels.vector.extend(classLabels)
+    nms.stringClassLabels.vector.extend(class_labels)
 
-    return nmsSpec
+    return nms_spec
 
 
-def combineModelsAndExport(builderSpec, nmsSpec, fileName, quantize=False):
+def combine_models_and_export(opt, builder_spec, nms_spec, file_name, quantize=False):
     '''
     Combines the coreml model with export logic and the nms to one final model. Optionally save with different quantization (32, 16, 8) (Works only if on Mac Os)
     '''
     try:
         print(f'Combine CoreMl model with nms and export model')
         # Combine models to a single one
-        pipeline = ct.models.pipeline.Pipeline(input_features=[("image", ct.models.datatypes.Array(3, 460, 460)),
+        pipeline = ct.models.pipeline.Pipeline(input_features=[("image", ct.models.datatypes.Array(3, opt.img_size, opt.img_size)),
                                                                ("iouThreshold", ct.models.datatypes.Double(
                                                                )),
                                                                ("confidenceThreshold", ct.models.datatypes.Double())], output_features=["confidence", "coordinates"])
@@ -225,15 +225,15 @@ def combineModelsAndExport(builderSpec, nmsSpec, fileName, quantize=False):
         # Required version (>= ios13) in order for mns to work
         pipeline.spec.specificationVersion = 4
 
-        pipeline.add_model(builderSpec)
-        pipeline.add_model(nmsSpec)
+        pipeline.add_model(builder_spec)
+        pipeline.add_model(nms_spec)
 
         pipeline.spec.description.input[0].ParseFromString(
-            builderSpec.description.input[0].SerializeToString())
+            builder_spec.description.input[0].SerializeToString())
         pipeline.spec.description.output[0].ParseFromString(
-            nmsSpec.description.output[0].SerializeToString())
+            nms_spec.description.output[0].SerializeToString())
         pipeline.spec.description.output[1].ParseFromString(
-            nmsSpec.description.output[1].SerializeToString())
+            nms_spec.description.output[1].SerializeToString())
 
         # Metadata for the model‚
         pipeline.spec.description.input[
@@ -249,20 +249,20 @@ def combineModelsAndExport(builderSpec, nmsSpec, fileName, quantize=False):
         pipeline.spec.description.metadata.license = ""
 
         model = ct.models.MLModel(pipeline.spec)
-        model.save(fileName)
+        model.save(file_name)
 
         if quantize:
-            fileName16 = fileName.replace(".mlmodel", "_16.mlmodel")
-            modelFp16 = ct.models.neural_network.quantization_utils.quantize_weights(
+            file_name16 = file_name.replace(".mlmodel", "_16.mlmodel")
+            model_fp16 = ct.models.neural_network.quantization_utils.quantize_weights(
                 model, nbits=16)
-            modelFp16.save(fileName16)
+            model_fp16.save(file_name16)
 
-            fileName8 = fileName.replace(".mlmodel", "_8.mlmodel")
-            modelFp8 = ct.models.neural_network.quantization_utils.quantize_weights(
+            file_name8 = file_name.replace(".mlmodel", "_8.mlmodel")
+            model_fp8 = ct.models.neural_network.quantization_utils.quantize_weights(
                 model, nbits=8)
-            modelFp8.save(fileName8)
+            model_fp8.save(file_name8)
 
-        print(f'CoreML export success, saved as {fileName}')
+        print(f'CoreML export success, saved as {file_name}')
     except Exception as e:
         print(f'CoreML export failure: {e}')
 
@@ -288,10 +288,10 @@ def main():
 
 
     # The labels of your model, pretrained YOLOv5 models usually use the coco dataset and have 80 classes
-    classLabels = [f"label{i}" for i in range(80)]
-    numberOfClassLabels = len(classLabels)
+    class_labels = [f"label{i}" for i in range(80)]
+    number_of_class_labels = len(class_labels)
 
-    outputSize = numberOfClassLabels + 5
+    output_size = number_of_class_labels + 5
 
     #  Attention: Some models are reversed!
     reverseModel = False
@@ -303,18 +303,18 @@ def main():
 
     if reverseModel:
         strides.reverse()
-    featureMapDimensions = [opt.img_size // stride for stride in strides]
+    feature_map_dimensions = [opt.img_size // stride for stride in strides]
 
     anchors = ([10, 13, 16, 30, 33, 23], [30, 61, 62, 45, 59, 119], [
             116, 90, 156, 198, 373, 326])  # Take these from the <model>.yml in yolov5
     if reverseModel:
         anchors = anchors[::-1]
 
-    anchorGrid = torch.tensor(anchors).float().view(3, -1, 1, 1, 2)
+    anchor_grid = torch.tensor(anchors).float().view(3, -1, 1, 1, 2)
 
     Path(opt.model_output_directory).mkdir(parents=True, exist_ok=True)
 
-    sampleInput = torch.zeros((1, 3, opt.img_size, opt.img_size))
+    sample_input = torch.zeros((1, 3, opt.img_size, opt.img_size))
     checkInputs = [(torch.rand(1, 3, opt.img_size, opt.img_size),),
                    (torch.rand(1, 3, opt.img_size, opt.img_size),)]
 
@@ -324,25 +324,24 @@ def main():
     model.eval()
     model.model[-1].export = True
     # Dry run, necessary for correct tracing!
-    model(sampleInput)
+    model(sample_input)
 
-    ts = exportTorchscript(model, sampleInput, checkInputs,
+    ts = export_torchscript(model, sample_input, checkInputs,
                            f"{opt.model_output_directory}/{opt.model_output_name}.torchscript.pt")
 
     # Convert pytorch to raw coreml model
-    modelSpec = convertToCoremlSpec(ts, sampleInput)
-    addOutputMetaData(modelSpec, featureMapDimensions, outputSize)
+    modelSpec = convert_to_coreml_spec(ts, sample_input)
+    add_output_meta_data(modelSpec, feature_map_dimensions, output_size)
 
     # Add export logic to coreml model
     builder = ct.models.neural_network.NeuralNetworkBuilder(spec=modelSpec)
-    addExportLayerToCoreml(opt, builder, anchorGrid, featureMapDimensions, strides, numberOfClassLabels)
+    add_export_layer_to_coreml(opt, builder, anchor_grid, feature_map_dimensions, strides, number_of_class_labels)
 
     # Create nms logic
-    nmsSpec = createNmsModelSpec(builder.spec, numberOfClassLabels, classLabels)
+    nms_spec = create_nms_model_spec(builder.spec, number_of_class_labels, class_labels)
 
     # Combine model with export logic and nms logic
-    combineModelsAndExport(
-        builder.spec, nmsSpec, f"{opt.model_output_directory}/{opt.model_output_name}.mlmodel", opt.quantize)
+    combine_models_and_export(opt, builder.spec, nms_spec, f"{opt.model_output_directory}/{opt.model_output_name}.mlmodel", opt.quantize)
 
 
 if __name__ == '__main__':
