@@ -30,27 +30,6 @@ def silu(context, node):
     z = mb.mul(x=x, y=y, name=node.name)
     context.add(z)
 
-# The labels of your model, pretrained YOLOv5 models usually use the coco dataset and have 80 classes
-classLabels = [f"label{i}" for i in range(80)]
-numberOfClassLabels = len(classLabels)
-outputSize = numberOfClassLabels + 5
-
-#  Attention: Some models are reversed!
-reverseModel = False
-
-strides = [8, 16, 32]
-if reverseModel:
-    strides.reverse()
-featureMapDimensions = [640 // stride for stride in strides]
-
-anchors = ([10, 13, 16, 30, 33, 23], [30, 61, 62, 45, 59, 119], [
-           116, 90, 156, 198, 373, 326])  # Take these from the <model>.yml in yolov5
-if reverseModel:
-    anchors = anchors[::-1]
-
-anchorGrid = torch.tensor(anchors).float().view(3, -1, 1, 1, 2)
-
-
 def make_grid(nx, ny):
     yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
     return torch.stack((xv, yv), 2).view((ny, nx, 2)).float()
@@ -86,7 +65,7 @@ def convertToCoremlSpec(torchScript, sampleInput):
     return nnSpec
 
 
-def addOutputMetaData(nnSpec):
+def addOutputMetaData(nnSpec, featureMapDimensions, outputSize):
     '''
     Adds the correct output shapes and data types to the coreml model
     '''
@@ -103,7 +82,7 @@ def addOutputMetaData(nnSpec):
         nnSpec.description.output[i].type.multiArrayType.dataType = ct.proto.FeatureTypes_pb2.ArrayFeatureType.DOUBLE
 
 
-def addExportLayerToCoreml(builder):
+def addExportLayerToCoreml(opt, builder, anchorGrid, featureMapDimensions, strides, numberOfClassLabels):
     '''
     Adds the yolov5 export layer to the coreml model
     '''
@@ -153,7 +132,7 @@ def addExportLayerToCoreml(builder):
         builder.add_concat_nd(name=f"concat_coordinates_{outputName}", input_names=[
                               f"{outputName}_calculated_xy", f"{outputName}_calculated_wh"], output_name=f"{outputName}_raw_coordinates", axis=-1)
         builder.add_scale(name=f"normalize_coordinates_{outputName}", input_name=f"{outputName}_raw_coordinates",
-                          output_name=f"{outputName}_raw_normalized_coordinates", W=torch.tensor([1 / 640]).numpy(), b=0, has_bias=False)
+                          output_name=f"{outputName}_raw_normalized_coordinates", W=torch.tensor([1 / opt.img_size]).numpy(), b=0, has_bias=False)
 
         ### Confidence calculation ###
         builder.add_slice(name=f"slice_object_confidence_{outputName}", input_name=f"{outputName}_sigmoid",
@@ -176,10 +155,11 @@ def addExportLayerToCoreml(builder):
                           f"{outputName}_flatten_raw_coordinates" for outputName in outputNames], output_name="raw_coordinates", axis=-2)
 
     builder.set_output(output_names=["raw_confidence", "raw_coordinates"], output_dims=[
-                       (25200, numberOfClassLabels), (25200, 4)])
+                       (3 * ((opt.img_size // 8 )**2 + (opt.img_size // 16)**2 + (opt.img_size // 32)**2),
+                        numberOfClassLabels), (3 * ((opt.img_size // 8 )**2 + (opt.img_size // 16)**2 + (opt.img_size // 32)**2), 4)])
 
 
-def createNmsModelSpec(nnSpec):
+def createNmsModelSpec(nnSpec, numberOfClassLabels, classLabels):
     '''
     Create a coreml model with nms to filter the results of the model
     '''
@@ -224,6 +204,7 @@ def createNmsModelSpec(nnSpec):
     # Some good default values for the two additional inputs, can be overwritten when using the model
     nms.iouThreshold = 0.6
     nms.confidenceThreshold = 0.4
+
     nms.stringClassLabels.vector.extend(classLabels)
 
     return nmsSpec
@@ -264,7 +245,7 @@ def combineModelsAndExport(builderSpec, nmsSpec, fileName, quantize=False):
             1].shortDescription = u"Boxes \xd7 [x, y, width, height] (relative to image size)"
         pipeline.spec.description.metadata.versionString = "1.0"
         pipeline.spec.description.metadata.shortDescription = "yolov5"
-        pipeline.spec.description.metadata.author = "Leon De Andrade"
+        pipeline.spec.description.metadata.author = ""
         pipeline.spec.description.metadata.license = ""
 
         model = ct.models.MLModel(pipeline.spec)
@@ -295,6 +276,8 @@ def main():
                         dest="model_output_directory", default='output/models', help='model output path')
     parser.add_argument('--model-output-name', type=str, dest="model_output_name",
                         default='yolov5-iOS', help='model output name')
+    parser.add_argument('--img-size', type=int, dest="img_size",
+                        default='416', help='size of the output image')
     parser.add_argument('--quantize-model', action="store_true", dest="quantize",
                         help='Pass flag quantized models are needed (Only works on mac Os)')
     opt = parser.parse_args()
@@ -303,11 +286,37 @@ def main():
         print("Error: Input model not found")
         return
 
+
+    # The labels of your model, pretrained YOLOv5 models usually use the coco dataset and have 80 classes
+    classLabels = [f"label{i}" for i in range(80)]
+    numberOfClassLabels = len(classLabels)
+
+    outputSize = numberOfClassLabels + 5
+
+    #  Attention: Some models are reversed!
+    reverseModel = False
+
+    strides = [8, 16, 32]
+
+    if not all(opt.img_size % i == 0 for i in strides):
+        assert False, 'Please provide valid image size'
+
+    if reverseModel:
+        strides.reverse()
+    featureMapDimensions = [opt.img_size // stride for stride in strides]
+
+    anchors = ([10, 13, 16, 30, 33, 23], [30, 61, 62, 45, 59, 119], [
+            116, 90, 156, 198, 373, 326])  # Take these from the <model>.yml in yolov5
+    if reverseModel:
+        anchors = anchors[::-1]
+
+    anchorGrid = torch.tensor(anchors).float().view(3, -1, 1, 1, 2)
+
     Path(opt.model_output_directory).mkdir(parents=True, exist_ok=True)
 
-    sampleInput = torch.zeros((1, 3, 640, 640))
-    checkInputs = [(torch.rand(1, 3, 640, 640),),
-                   (torch.rand(1, 3, 640, 640),)]
+    sampleInput = torch.zeros((1, 3, opt.img_size, opt.img_size))
+    checkInputs = [(torch.rand(1, 3, opt.img_size, opt.img_size),),
+                   (torch.rand(1, 3, opt.img_size, opt.img_size),)]
 
     model = torch.load(opt.model_input_path, map_location=torch.device('cpu'))[
         'model'].float()
@@ -322,14 +331,14 @@ def main():
 
     # Convert pytorch to raw coreml model
     modelSpec = convertToCoremlSpec(ts, sampleInput)
-    addOutputMetaData(modelSpec)
+    addOutputMetaData(modelSpec, featureMapDimensions, outputSize)
 
     # Add export logic to coreml model
     builder = ct.models.neural_network.NeuralNetworkBuilder(spec=modelSpec)
-    addExportLayerToCoreml(builder)
+    addExportLayerToCoreml(opt, builder, anchorGrid, featureMapDimensions, strides, numberOfClassLabels)
 
     # Create nms logic
-    nmsSpec = createNmsModelSpec(builder.spec)
+    nmsSpec = createNmsModelSpec(builder.spec, numberOfClassLabels, classLabels)
 
     # Combine model with export logic and nms logic
     combineModelsAndExport(
