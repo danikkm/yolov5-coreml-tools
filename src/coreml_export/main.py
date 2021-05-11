@@ -251,15 +251,14 @@ def combine_models_and_export(opt, builder_spec, nms_spec, file_name, quantize=F
             nms_spec.description.output[1].SerializeToString())
 
         # Metadata for the model‚
-        pipeline.spec.description.input[
-            1].shortDescription = "(optional) IOU Threshold override (Default: 0.6)"
-        pipeline.spec.description.input[
-            2].shortDescription = "(optional) Confidence Threshold override (Default: 0.4)"
+        pipeline.spec.description.input[0].shortDescription = f'{opt.img_size}x{opt.img_size} RGB Image'
+        pipeline.spec.description.input[1].shortDescription = "(optional) IOU Threshold override (Default: 0.6)"
+        pipeline.spec.description.input[2].shortDescription = "(optional) Confidence Threshold override (Default: 0.4)"
         pipeline.spec.description.output[0].shortDescription = u"Boxes \xd7 Class confidence"
         pipeline.spec.description.output[
             1].shortDescription = u"Boxes \xd7 [x, y, width, height] (relative to image size)"
         pipeline.spec.description.metadata.versionString = "1.0"
-        pipeline.spec.description.metadata.shortDescription = "yolov5"
+        pipeline.spec.description.metadata.shortDescription = opt.model_output_name
         pipeline.spec.description.metadata.author = ""
         pipeline.spec.description.metadata.license = ""
 
