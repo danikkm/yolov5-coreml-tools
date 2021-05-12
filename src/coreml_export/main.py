@@ -48,6 +48,20 @@ def read_coco_dataset_labels(opt):
   return labels
 
 
+def read_model_config_anchors(opt):
+  dataset_file = {}
+  anchors = []
+  with open(opt.model_config_file, 'r') as file:
+    dataset_file = yaml.load(file, Loader=yaml.FullLoader)
+
+  try:
+    anchors = dataset_file['anchors']
+  except Exception as e:
+    assert False, 'Error: invalid config file provided'
+
+  return tuple(anchors)
+
+
 def make_grid(nx, ny):
   yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
   return torch.stack((xv, yv), 2).view((ny, nx, 2)).float()
@@ -297,6 +311,8 @@ def main():
                       default='416', help='size of the output image')
   parser.add_argument('--coco-dataset-file', type=str, dest='coco_dataset_file',
                       help='path to the coco dataset file, e.g., coco.yaml')
+  parser.add_argument('--model-config-file', type=str, dest='model_config_file',
+                      help='path to the model config file, e.g., yolov5s.yaml')
   parser.add_argument('--quantize-model', action='store_true', dest='quantize',
                       help='Pass flag quantized models are needed (Only works on macOS)')
   opt = parser.parse_args()
@@ -305,7 +321,10 @@ def main():
     assert False, 'Error: Input model not found'
 
   if not opt.coco_dataset_file:
-    assert False, 'Error: Please provide path to the coco dataset file'
+    assert False, 'Error: Please provide path to the coco dataset file --coco-dataset-file'
+
+  if not opt.model_config_file:
+    assert False, 'Error: Please provide path to the model config file --model-config_file'
 
   class_labels = read_coco_dataset_labels(opt)
   number_of_class_labels = len(class_labels)
@@ -324,8 +343,7 @@ def main():
     strides.reverse()
   feature_map_dimensions = [opt.img_size // stride for stride in strides]
 
-  anchors = ([10, 13, 16, 30, 33, 23], [30, 61, 62, 45, 59, 119], [
-      116, 90, 156, 198, 373, 326])  # Take these from the <model>.yml in yolov5
+  anchors = read_model_config_anchors(opt)
   if reverseModel:
     anchors = anchors[::-1]
 
